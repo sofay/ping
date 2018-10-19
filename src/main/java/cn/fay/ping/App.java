@@ -1,5 +1,6 @@
 package cn.fay.ping;
 
+import com.mysql.jdbc.exceptions.jdbc4.MySQLNonTransientConnectionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,7 @@ import java.sql.SQLException;
 import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author fay  fay9395@gmail.com
@@ -23,13 +25,13 @@ import java.util.concurrent.Executors;
  */
 public class App {
     private static final Logger LOGGER = LoggerFactory.getLogger("ping");
+    private static Connection connection = null;
 
     public static void main(String[] args) throws Exception {
-        final Connection connection = getConnection();
+        connection = getConnection();
         if (connection == null) {
             return;
         }
-
         Runtime.getRuntime().addShutdownHook(new Thread() {
             public void run() {
                 if (connection != null) {
@@ -45,9 +47,11 @@ public class App {
         BufferedReader reader = new BufferedReader(new InputStreamReader(App.class.getClassLoader().getResourceAsStream("url.txt")));
         ExecutorService executorService = Executors.newCachedThreadPool();
         String line;
+        boolean needClean = false;
         try {
             while ((line = reader.readLine()) != null) {
                 final String data = line;
+                needClean = true;
                 executorService.submit(new Runnable() {
                     public void run() {
                         String url = data.split(":")[0];
@@ -70,7 +74,7 @@ public class App {
                                     msg = e.getMessage();
                                 }
                             }
-                            putData(name, url, port, delay, msg, connection);
+                            putData(name, url, port, delay, msg);
                             LOGGER.info("name:{} url:{} cast:{} msg:{}", name, url, delay, msg);
                             try {
                                 Thread.sleep(1000); // 1s
@@ -80,6 +84,21 @@ public class App {
                         }
                     }
                 });
+            }
+            if (needClean) {
+                final Connection connectionForDelete = getConnection();
+                Executors.newScheduledThreadPool(1).scheduleAtFixedRate(new Runnable() {
+                    public void run() {
+                        String sql = "delete from delay where time < ? - interval 1 hour";
+                        try {
+                            PreparedStatement preparedStatement = connectionForDelete.prepareStatement(sql);
+                            preparedStatement.setObject(1, new Date());
+                            preparedStatement.execute();
+                        } catch (SQLException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }, 1L, 3600L, TimeUnit.SECONDS);
             }
         } finally {
             reader.close();
@@ -92,10 +111,10 @@ public class App {
         } catch (ClassNotFoundException e) {
             return null;
         }
-        return DriverManager.getConnection("jdbc:mysql:///vpn", "root", null);
+        return DriverManager.getConnection("jdbc:mysql://106.12.84.24:3306/vpn?autoReconnect=true", "root", null);
     }
 
-    private static void putData(String name, String url, int port, int delay, String msg, Connection connection) {
+    private static void putData(String name, String url, int port, int delay, String msg) {
         String sql = "insert into delay(time, name, url, port, delay, msg) values(?, ?, ?, ?, ?, ?)";
         PreparedStatement preparedStatement = null;
         try {
@@ -109,7 +128,18 @@ public class App {
             preparedStatement.setString(i++, msg);
             preparedStatement.execute();
         } catch (SQLException e) {
-            e.printStackTrace();
+            if (e instanceof MySQLNonTransientConnectionException) {
+                try {
+                    connection = getConnection();
+                    if (connection != null) {
+                        putData(name, url, port, delay, msg);
+                    }
+                } catch (SQLException e1) {
+                    e1.printStackTrace();
+                }
+            } else {
+                e.printStackTrace();
+            }
         } finally {
             if (preparedStatement != null) {
                 try {
